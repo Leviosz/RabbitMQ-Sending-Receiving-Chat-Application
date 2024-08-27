@@ -1,0 +1,96 @@
+using System;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
+using System.Collections.Generic;
+using System.Text;
+
+class Exchange
+{
+    private static List<Order> orderBook = new List<Order>();
+
+    public static void Main(string[] args)
+    {
+        if (args.Length < 1)
+        {
+            Console.WriteLine("Usage: Exchange <endpoint>");
+            return;
+        }
+
+        string endpoint = args[0];
+
+        var factory = new ConnectionFactory() { Uri = new Uri(endpoint) };
+        using var connection = factory.CreateConnection();
+        using var channel = connection.CreateModel();
+
+        channel.QueueDeclare(queue: "orders", durable: false, exclusive: false, autoDelete: false, arguments: null);
+        channel.QueueDeclare(queue: "trades", durable: false, exclusive: false, autoDelete: false, arguments: null);
+
+        var consumer = new EventingBasicConsumer(channel);
+        consumer.Received += (model, ea) =>
+        {
+            var body = ea.Body.ToArray();
+            var message = Encoding.UTF8.GetString(body);
+            var order = ParseOrder(message);
+            ProcessOrder(order, channel);
+        };
+        channel.BasicConsume(queue: "orders", autoAck: true, consumer: consumer);
+
+        Console.WriteLine("Exchange is running. Press [enter] to exit.");
+        Console.ReadLine();
+    }
+
+    private static Order ParseOrder(string message)
+    {
+        var parts = message.Split(':');
+        return new Order
+        {
+            Username = parts[0],
+            Side = parts[1],
+            Quantity = int.Parse(parts[2]),
+            Price = double.Parse(parts[3])
+        };
+    }
+
+    private static void ProcessOrder(Order order, IModel channel)
+    {
+        foreach (var existingOrder in orderBook)
+        {
+            if (existingOrder.Side != order.Side && IsPriceAcceptable(order, existingOrder))
+            {
+                PublishTrade(order, existingOrder, channel);
+                orderBook.Remove(existingOrder);
+                return;
+            }
+        }
+        orderBook.Add(order);
+    }
+
+    private static bool IsPriceAcceptable(Order order, Order existingOrder)
+    {
+        if (order.Side == "BUY")
+        {
+            return order.Price >= existingOrder.Price;
+        }
+        else
+        {
+            return order.Price <= existingOrder.Price;
+        }
+    }
+
+    private static void PublishTrade(Order order, Order existingOrder, IModel channel)
+    {
+        var tradeMessage = $"{order.Username}:{existingOrder.Username}:{order.Price}";
+        var body = Encoding.UTF8.GetBytes(tradeMessage);
+
+        channel.BasicPublish(exchange: "", routingKey: "trades", basicProperties: null, body: body);
+        Console.WriteLine($" [x] Trade executed: {tradeMessage}");
+    }
+
+    private class Order
+    {
+        public string Username { get; set; }
+        public string Side { get; set; }
+        public int Quantity { get; set; }
+        public double Price { get; set; }
+    }
+}
